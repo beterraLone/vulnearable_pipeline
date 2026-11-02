@@ -1,0 +1,81 @@
+name: DAST Security Pipeline
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  security_dast_scan:
+    runs-on: ubuntu-latest
+
+    # Поднимаем уязвимый API vAmPI в качестве сервиса (мишени)
+    services:
+      vampi-target:
+        image: erev0s/vampi:latest
+        ports:
+          - 5000:5000
+
+    steps:
+      - name: Клонирование репозитория
+        uses: actions/checkout@v4
+
+      - name: Ожидание старта сервиса vAmPI
+        run: |
+          echo "Ожидание готовности API..."
+          sleep 10
+          curl -I http://localhost:5000/openapi.json
+
+      - name: Запуск сканера OWASP ZAP (DAST)
+        run: |
+          # Выдаем права на запись отчетов
+          chmod 777 ${{ github.workspace }}
+          
+          # Запускаем официальный DAST-сканер ZAP по спецификации OpenAPI
+          docker run --rm --network=host -u root -v ${{ github.workspace }}:/zap/wrk/:rw zaproxy/zap-stable:latest \
+            zap-api-scan.py -t http://localhost:5000/openapi.json -f openapi -J report.json -r report.html || true
+
+      - name: Security Quality Gate (Анализ отчета и блокировка)
+        run: |
+          python3 - << 'EOF'
+          import json, sys
+
+          try:
+              with open('report.json', 'r') as f:
+                  data = json.load(f)
+
+              site = data.get('site', [{}])[0]
+              alerts = site.get('alerts', [])
+              
+              # Ищем критические (3) и высокие (2) уязвимости
+              critical_alerts = [a for a in alerts if a.get('riskcode') in ['3', '2']]
+
+              print("=" * 60)
+              print(f"[!] Quality Gate: Проверка отчета DAST сканирования...")
+              print(f"[!] Всего дефектов найдено: {len(alerts)}")
+              print(f"[!] Критических/Высоких уязвимостей: {len(critical_alerts)}")
+              print("=" * 60)
+
+              for alert in critical_alerts:
+                  print(f" -> [{alert.get('riskdesc')}] {alert.get('alert')}")
+
+              if critical_alerts:
+                  print("\n[BLOCKED] Сборка отклонена политикой безопасности! Обнаружены опасные уязвимости.")
+                  sys.exit(1)
+              
+              print("\n[PASSED] Критических уязвимостей нет. Развертывание разрешено.")
+              sys.exit(0)
+
+          except Exception as e:
+              print(f"Ошибка чтения отчета сканера: {e}")
+              sys.exit(1)
+          EOF
+
+      - name: Сохранение HTML и JSON отчетов в артефакты
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-security-reports
+          path: |
+            report.html
+            report.json
