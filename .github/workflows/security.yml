@@ -1,4 +1,4 @@
-name: DAST Security Pipeline (Authenticated)
+name: DevSecOps Pipeline
 
 on:
   push:
@@ -6,62 +6,36 @@ on:
   workflow_dispatch:
 
 jobs:
-  security_dast_scan:
+  build_and_security_scan:
     runs-on: ubuntu-latest
 
-    services:
-      vampi-target:
-        image: erev0s/vampi:latest
-        ports:
-          - 5000:5000
-
     steps:
-      - name: Клонирование репозитория
+      - name: 1. Клонирование исходного кода разработчика
         uses: actions/checkout@v4
 
-      - name: Ожидание старта сервиса vAmPI
+      - name: 2. Сборка Docker-образа из Dockerfile проекта
         run: |
-          echo "Ожидание старта API..."
-          sleep 10
+          echo "Собираем Docker-образ нашего микросервиса..."
+          docker build -t my-custom-api:latest .
+
+      - name: 3. Развертывание микросервиса в изолированном контейнере
+        run: |
+          echo "Запускаем контейнер с API..."
+          docker run -d -p 5000:5000 --name api-service my-custom-api:latest
+          sleep 5
+          # Проверяем, что API поднялся и отдает OpenAPI спецификацию
           curl -I http://localhost:5000/openapi.json
 
-      - name: Генерация тестового пользователя и получение JWT токена
-        id: get_token
-        run: |
-          echo "=== Создаем пользователя в vAmPI ==="
-          curl -s -X POST http://localhost:5000/users/v1/register \
-            -H "Content-Type: application/json" \
-            -d '{"username": "security_bot", "password": "Password123!", "email": "bot@test.com"}'
-
-          echo "=== Выполняем логин и получаем токен ==="
-          LOGIN_RES=$(curl -s -X POST http://localhost:5000/users/v1/login \
-            -H "Content-Type: application/json" \
-            -d '{"username": "security_bot", "password": "Password123!"}')
-          
-          # Вытаскиваем токен через утилиту jq
-          TOKEN=$(echo $LOGIN_RES | jq -r .auth_token)
-          echo "Токен успешно получен: ${TOKEN:0:15}..."
-          
-          # Сохраняем токен в переменную окружения шагов
-          echo "AUTH_TOKEN=$TOKEN" >> $GITHUB_ENV
-
-      - name: Запуск сканера OWASP ZAP с внедрением токена (DAST)
+      - name: 4. Динамическое тестирование защищенности (DAST) сканером OWASP ZAP
         run: |
           chmod 777 ${{ github.workspace }}
-
-          # Запускаем ZAP с активными правилами (-a)
-          # и правилом Replacer, внедряющим Header авторизации во все запросы
+          echo "Запуск DAST сканера по спецификации http://localhost:5000/openapi.json"
+          
+          # Запускаем официальный контейнер ZAP с активным сканированием (-a)
           docker run --rm --network=host -u root -v ${{ github.workspace }}:/zap/wrk/:rw zaproxy/zap-stable:latest \
-            zap-api-scan.py -t http://localhost:5000/openapi.json -f openapi -a \
-            -z "-config replacer.full_list(0).description=auth \
-                -config replacer.full_list(0).enabled=true \
-                -config replacer.full_list(0).matchtype=REQ_HEADER \
-                -config replacer.full_list(0).matchstr=Authorization \
-                -config replacer.full_list(0).regex=false \
-                -config replacer.full_list(0).replacement=Bearer\ ${{ env.AUTH_TOKEN }}" \
-            -J report.json -r report.html || true
+            zap-api-scan.py -t http://localhost:5000/openapi.json -f openapi -a -J report.json -r report.html || true
 
-      - name: Security Quality Gate (Анализ отчета)
+      - name: 5. Security Quality Gate (Автоматический контроль безопасности)
         run: |
           python3 - << 'EOF'
           import json, sys
@@ -74,7 +48,7 @@ jobs:
               alerts = site.get('alerts', [])
               
               print("=" * 60)
-              print(f"[!] Quality Gate: Анализ защищенности REST API (с аутентификацией)...")
+              print(f"[!] Quality Gate: Проверка отчета сканера...")
               print(f"[!] Всего дефектов найдено: {len(alerts)}")
               print("=" * 60)
 
@@ -83,16 +57,16 @@ jobs:
                   name = alert.get('alert', 'Unknown')
                   print(f" -> [{risk}] {name}")
 
-              # Ищем реальные High (3) и Medium (2)
+              # Ищем критические уязвимости (High = 3, Medium = 2)
               critical_alerts = [a for a in alerts if int(a.get('riskcode', 0)) >= 2]
 
               print("=" * 60)
               if critical_alerts:
-                  print(f"\n[BLOCKED] Quality Gate: Обнаружены критические уязвимости: {len(critical_alerts)}")
-                  print("[FAIL] Сборка отклонена! Найдены дефекты бизнес-логики/валидации.")
+                  print(f"\n[BLOCKED] Quality Gate: Обнаружены опасные уязвимости: {len(critical_alerts)}")
+                  print("[FAIL] В исходном коде найдены критические дефекты! Релиз заблокирован.")
                   sys.exit(1)
               
-              print("\n[PASSED] Уязвимостей не найдено. Развертывание разрешено.")
+              print("\n[PASSED] Критических уязвимостей не найдено. Сборка одобрена.")
               sys.exit(0)
 
           except Exception as e:
@@ -100,11 +74,11 @@ jobs:
               sys.exit(1)
           EOF
 
-      - name: Сохранение артефактов
+      - name: 6. Сохранение отчетов безопасности
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: zap-authenticated-reports
+          name: zap-security-reports
           path: |
             report.html
             report.json
