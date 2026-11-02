@@ -47,23 +47,27 @@ jobs:
               site = data.get('site', [{}])[0]
               alerts = site.get('alerts', [])
               
-              # Ищем критические (3) и высокие (2) уязвимости
-              critical_alerts = [a for a in alerts if a.get('riskcode') in ['3', '2']]
-
               print("=" * 60)
-              print(f"[!] Quality Gate: Проверка отчета DAST сканирования...")
-              print(f"[!] Всего дефектов найдено: {len(alerts)}")
-              print(f"[!] Критических/Высоких уязвимостей: {len(critical_alerts)}")
+              print(f"[!] Quality Gate: Анализ защищенности REST API...")
+              print(f"[!] Всего дефектов найдено сканером: {len(alerts)}")
               print("=" * 60)
 
-              for alert in critical_alerts:
-                  print(f" -> [{alert.get('riskdesc')}] {alert.get('alert')}")
+              # Печатаем вообще все найденные проблемы
+              for alert in alerts:
+                  risk = alert.get('riskdesc', 'Unknown')
+                  name = alert.get('alert', 'Unknown')
+                  print(f" -> [{risk}] {name}")
 
-              if critical_alerts:
-                  print("\n[BLOCKED] Сборка отклонена политикой безопасности! Обнаружены опасные уязвимости.")
+              # Строгая политика: блокировать при наличии уязвимостей уровня High или Medium (код 3 или 2)
+              dangerous = [a for a in alerts if int(a.get('riskcode', 0)) >= 2]
+
+              print("=" * 60)
+              if dangerous:
+                  print(f"\n[BLOCKED] Quality Gate: Найдено опасных уязвимостей (Medium/High): {len(dangerous)}")
+                  print("[FAIL] Сборка отклонена политикой безопасности! Деплой в продакшен запрещен.")
                   sys.exit(1)
               
-              print("\n[PASSED] Критических уязвимостей нет. Развертывание разрешено.")
+              print("\n[PASSED] Критических уязвимостей не найдено. Развертывание разрешено.")
               sys.exit(0)
 
           except Exception as e:
